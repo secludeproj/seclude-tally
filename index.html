@@ -219,6 +219,15 @@ tr:hover td{background:#f7fbf9}
         </div>
       </div>
 
+      <div class="settings-section">Voucher</div>
+      <div class="settings-grid">
+        <div class="field">
+          <label>Voucher Type Name ⚠</label>
+          <input id="s-vchtype" value="Sales">
+          <div class="field-note">Must match exactly — check Gateway of Tally → Accounts Info → Voucher Types</div>
+        </div>
+      </div>
+
       <div class="settings-section">Revenue Ledgers</div>
       <div class="settings-grid">
         <div class="field">
@@ -235,6 +244,23 @@ tr:hover td{background:#f7fbf9}
           <label>Add-on Revenue</label>
           <input id="s-addon" value="Add-on Revenue">
           <div class="field-note">For AddOn / ancillary invoices</div>
+        </div>
+        <div class="field">
+          <label>Discount Ledger</label>
+          <input id="s-discount" value="Discount on Sales">
+          <div class="field-note">Used only when invoice has a discount amount</div>
+        </div>
+      </div>
+
+      <div class="settings-section">OTA Bookings (Booking.com, MakeMyTrip etc.)</div>
+      <div class="settings-grid" style="align-items:start">
+        <div class="field">
+          <label>Book OTA invoices against</label>
+          <select id="s-ota-party" style="border:1px solid var(--line);border-radius:7px;padding:7px 10px;font-family:var(--ff);font-size:.82rem;color:var(--ink);outline:none;background:var(--white)">
+            <option value="guest">Guest name (default)</option>
+            <option value="ota">OTA name (e.g. Booking.com)</option>
+          </select>
+          <div class="field-note">If OTA collects payment, book against OTA ledger so outstanding shows correctly</div>
         </div>
       </div>
 
@@ -336,15 +362,32 @@ tr:hover td{background:#f7fbf9}
 let parsedRows = [];
 
 // ─── Settings ────────────────────────────────────────────────────────────────
-const SETTING_IDS = ['s-company','s-debtors','s-room','s-fb','s-addon','s-cgst9','s-sgst9','s-cgst25','s-sgst25'];
+const SETTING_IDS = ['s-company','s-debtors','s-vchtype','s-room','s-fb','s-addon','s-discount','s-cgst9','s-sgst9','s-cgst25','s-sgst25','s-ota-party'];
+const DEFAULTS = {
+  's-company':'Seclude','s-debtors':'Sundry Debtors','s-vchtype':'Sales',
+  's-room':'Room Revenue','s-fb':'F&B Revenue','s-addon':'Add-on Revenue',
+  's-discount':'Discount on Sales',
+  's-cgst9':'Output CGST @ 9%','s-sgst9':'Output SGST @ 9%',
+  's-cgst25':'Output CGST @ 2.5%','s-sgst25':'Output SGST @ 2.5%',
+  's-ota-party':'guest'
+};
 function loadSettings(){
   try{
     const saved = JSON.parse(localStorage.getItem('seclude_tally_settings')||'{}');
     SETTING_IDS.forEach(id=>{
       const el=document.getElementById(id);
-      if(saved[id]&&el) el.value=saved[id];
+      if(!el) return;
+      if(saved[id]!==undefined) el.value=saved[id];
     });
   }catch(e){}
+}
+function settingsAreDefaults(){
+  // Returns list of fields still on default value (excluding s-ota-party which is a choice not a name)
+  const checkIds = SETTING_IDS.filter(id=>id!=='s-ota-party');
+  return checkIds.filter(id=>{
+    const el=document.getElementById(id);
+    return el && el.value.trim()===DEFAULTS[id];
+  });
 }
 function saveSettings(){
   const out={};
@@ -634,13 +677,14 @@ function buildTallyXML(){
   lines.push('      <REQUESTDATA>');
 
   // ── Pre-create all revenue + tax ledgers once (Tally skips silently if already exists) ──
-  mkLedger(lines, s['s-room'],   'Sales Accounts');
-  mkLedger(lines, s['s-fb'],     'Sales Accounts');
-  mkLedger(lines, s['s-addon'],  'Sales Accounts');
-  mkLedger(lines, s['s-cgst9'],  'Duties & Taxes');
-  mkLedger(lines, s['s-sgst9'],  'Duties & Taxes');
-  mkLedger(lines, s['s-cgst25'], 'Duties & Taxes');
-  mkLedger(lines, s['s-sgst25'], 'Duties & Taxes');
+  mkLedger(lines, s['s-room'],     'Sales Accounts');
+  mkLedger(lines, s['s-fb'],       'Sales Accounts');
+  mkLedger(lines, s['s-addon'],    'Sales Accounts');
+  mkLedger(lines, s['s-discount'], 'Sales Accounts');
+  mkLedger(lines, s['s-cgst9'],    'Duties & Taxes');
+  mkLedger(lines, s['s-sgst9'],    'Duties & Taxes');
+  mkLedger(lines, s['s-cgst25'],   'Duties & Taxes');
+  mkLedger(lines, s['s-sgst25'],   'Duties & Taxes');
 
   // ── Guest ledgers + vouchers ──
   const guestsAdded = new Set();
@@ -648,7 +692,9 @@ function buildTallyXML(){
   parsedRows.forEach(r=>{
     const type=classifyType(r);
     const revLedger = type==='room' ? s['s-room'] : type==='fb' ? s['s-fb'] : s['s-addon'];
-    const partyName = (r.partyName||r.guestName||'Unknown Guest').trim();
+    const isOTA = (r.bookingSource||'').toLowerCase()==='ota' && r.agentName && r.agentName!=='--';
+    const useOTAParty = isOTA && s['s-ota-party']==='ota';
+    const partyName = (useOTAParty ? r.agentName : (r.partyName||r.guestName||'Unknown Guest')).trim();
     const dateStr   = fmtTallyDate(r.invoiceDate) || fmtTallyDate(new Date());
     const narration = [
       r.property?'Property: '+shortProp(r.property):'',
@@ -668,9 +714,9 @@ function buildTallyXML(){
 
     // Sales voucher
     lines.push('        <TALLYMESSAGE xmlns:UDF="TallyUDF">');
-    lines.push('          <VOUCHER VCHTYPE="Sales" ACTION="Create" OBJVIEW="Invoice Voucher View">');
+    lines.push(`          <VOUCHER VCHTYPE="${esc(s['s-vchtype'])}" ACTION="Create" OBJVIEW="Invoice Voucher View">`);
     lines.push(`            <DATE>${dateStr}</DATE>`);
-    lines.push('            <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>');
+    lines.push(`            <VOUCHERTYPENAME>${esc(s['s-vchtype'])}</VOUCHERTYPENAME>`);
     lines.push(`            <VOUCHERNUMBER>${esc(r.invoiceNum)}</VOUCHERNUMBER>`);
     lines.push(`            <PARTYLEDGERNAME>${esc(partyName)}</PARTYLEDGERNAME>`);
     lines.push('            <ISINVOICE>Yes</ISINVOICE>');
@@ -690,7 +736,16 @@ function buildTallyXML(){
     lines.push(`              <AMOUNT>${round2(r.taxableAmt)}</AMOUNT>`);
     lines.push('            </ALLLEDGERENTRIES.LIST>');
 
-    // 3. Tax — only include non-zero entries
+    // 3. Discount — if present, credit it separately (reduces revenue)
+    if(r.discount && r.discount > 0){
+      lines.push('            <ALLLEDGERENTRIES.LIST>');
+      lines.push(`              <LEDGERNAME>${esc(s['s-discount'])}</LEDGERNAME>`);
+      lines.push('              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>');
+      lines.push(`              <AMOUNT>${round2(-r.discount)}</AMOUNT>`);
+      lines.push('            </ALLLEDGERENTRIES.LIST>');
+    }
+
+    // 4. Tax — only include non-zero entries
     const taxMap = [
       {ledger:s['s-cgst9'],  amt:r.cgst9},
       {ledger:s['s-sgst9'],  amt:r.sgst9},
@@ -775,6 +830,7 @@ function renderAudit(){
   const passed = results.filter(x=>x.pass).length;
   const failed = total - passed;
   const allPass = failed === 0;
+  const defaultFields = settingsAreDefaults();
 
   // Per-property breakdown
   const byProp = {};
@@ -800,6 +856,30 @@ function renderAudit(){
         : `⚠️ <strong>${failed} voucher${failed>1?'s':''} have issues</strong> — review the table below before importing.`}
     </div>
   </div>`;
+
+  // ── Settings defaults warning ──
+  if(defaultFields.length > 0){
+    const labels = {
+      's-company':'Company Name','s-debtors':'Sundry Debtors Group',
+      's-vchtype':'Voucher Type Name','s-room':'Room Revenue',
+      's-fb':'F&B Revenue','s-addon':'Add-on Revenue',
+      's-discount':'Discount Ledger',
+      's-cgst9':'CGST 9%','s-sgst9':'SGST 9%',
+      's-cgst25':'CGST 2.5%','s-sgst25':'SGST 2.5%'
+    };
+    html += `<div class="notice notice-warn" style="margin-bottom:16px">
+      <svg class="notice-icon" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div>
+        <strong>Settings not verified yet</strong> — these ${defaultFields.length} fields are still on their default values.
+        Confirm they match your Tally ledger names before importing, or vouchers may create duplicate ledgers:<br>
+        <span style="font-family:var(--fm);font-size:.72rem">${defaultFields.map(id=>labels[id]||id).join(' · ')}</span>
+        <br><button onclick="toggleSettings();document.getElementById('settings-panel').scrollIntoView({behavior:'smooth'})"
+          style="margin-top:6px;background:var(--amber);color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:.75rem;font-weight:600;cursor:pointer;font-family:var(--ff)">
+          Open Settings →
+        </button>
+      </div>
+    </div>`;
+  }
 
   // Checks legend
   html += `<div class="audit-section">
